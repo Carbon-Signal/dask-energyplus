@@ -86,22 +86,37 @@ jobs:
       
           [[ -s "$tmp" ]] || { echo "No releases returned"; exit 1; }
       
-          base=$(jq -cs --arg min "$min_tag" "$JQ_FUNCS
-            [ inputs ]
-            | map({ tag: .tag_name, assets: .assets })
-            | map(select(ver(.tag) != null and ver(.tag) >= ver($min)))
-            | map({
-                tag,
-                ubuntu: best_ubuntu(.assets),
-                has_amd64: ( [ .assets[]? | select(.name? | test(\"^EnergyPlus-.*-Linux-.*(x86_64|amd64)\\.sh$\";\"i\")) ] | length > 0 ),
-                has_arm64: ( [ .assets[]? | select(.name? | test(\"^EnergyPlus-.*-Linux-.*(arm64|aarch64)\\.sh$\";\"i\")) ] | length > 0 ),
-                amd64_url: ( [ .assets[]? | select(.name? | test(\"^EnergyPlus-.*-Linux-.*(x86_64|amd64)\\.sh$\";\"i\")) | .browser_download_url ] | first ),
-                arm64_url: ( [ .assets[]? | select(.name? | test(\"^EnergyPlus-.*-Linux-.*(arm64|aarch64)\\.sh$\";\"i\")) | .browser_download_url ] | first )
-              })
-            | map(select(.has_amd64 or .has_arm64))
-            | sort_by( ver(.tag) ) | reverse
-          " "$tmp")
-      
+          # Build `base` without letting Bash expand $min or other jq vars
+          base="$(jq -cs --arg min "$min_tag" -f /dev/stdin "$tmp" <<'JQ'
+          def ver($s):
+            ($s|ltrimstr("v")) as $v
+            | if ($v|test("^[0-9]+\.[0-9]+\.[0-9]+$")) then
+                ($v|split(".")|map(tonumber))
+              else null end;
+          
+          def best_ubuntu($assets):
+            if [ $assets[]? | select(.name? | test("Ubuntu24\.04";"i")) ]|length>0 then "24.04"
+            elif [ $assets[]? | select(.name? | test("Ubuntu22\.04";"i")) ]|length>0 then "22.04"
+            elif [ $assets[]? | select(.name? | test("Ubuntu20\.04";"i")) ]|length>0 then "20.04"
+            elif [ $assets[]? | select(.name? | test("Ubuntu18\.04";"i")) ]|length>0 then "18.04"
+            else "24.04" end;
+          
+          [ inputs ]
+          | map({ tag: .tag_name, assets: .assets })
+          | map(select(ver(.tag) != null and ver(.tag) >= ver($min)))
+          | map({
+              tag,
+              ubuntu: best_ubuntu(.assets),
+              has_amd64: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(x86_64|amd64)\.sh$";"i")) ] | length > 0 ),
+              has_arm64: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(arm64|aarch64)\.sh$";"i")) ] | length > 0 ),
+              amd64_url: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(x86_64|amd64)\.sh$";"i")) | .browser_download_url ] | first ),
+              arm64_url: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(arm64|aarch64)\.sh$";"i")) | .browser_download_url ] | first )
+            })
+          | map(select(.has_amd64 or .has_arm64))
+          | sort_by( ver(.tag) ) | reverse
+          JQ
+          )"
+          
           rows=()
           latest_tag=$(jq -r '.[0].tag // empty' <<<"$base")
           for tag in $(jq -r '.[].tag' <<<"$base"); do
