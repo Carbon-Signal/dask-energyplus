@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
 # Install the uv toolchain manager, then install CPython ${PYTHON_VERSION}
 # and make it the system default (python, python3, python${PYTHON_VERSION})
 RUN set -eux; \
-    curl -fsSL https://astral.sh/uv/install.sh | sh -s -- -y; \
+    curl -fsSL https://astral.sh/uv/install.sh | sh; \
     ln -sf /root/.local/bin/uv /usr/local/bin/uv; \
     uv python install ${PYTHON_VERSION}; \
     PYBIN="$(uv python find ${PYTHON_VERSION})"; \
