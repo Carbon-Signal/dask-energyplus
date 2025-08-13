@@ -25,13 +25,14 @@ ARG GITHUB_TOKEN
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Required to fetch and run the E+ installer only in this stage
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
-    apt-get update; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get update -o Acquire::Retries=3; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl jq expect bzip2; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*
 
 # Resolve arch for matching E+ asset names and downloads
 ENV ARCH=unknown ARCH_RE=unknown
@@ -113,14 +114,15 @@ LABEL org.opencontainers.image.title="dask-energyplus" \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Base runtime dependencies
-RUN --mount=type=cache,target=/var/cache/apt \
-    --mount=type=cache,target=/var/lib/apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     set -eux; \
-    apt-get update; \
+    rm -rf /var/lib/apt/lists/*; \
+    apt-get update -o Acquire::Retries=3; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl bzip2 \
       libgomp1 libx11-6 file; \
-    rm -rf /var/lib/apt/lists/*
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/apt/archives/partial/*
 
 # Install pinned Miniforge and create environment with Python + Dask
 ENV CONDA_DIR=/opt/conda
