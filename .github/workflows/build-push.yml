@@ -47,22 +47,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euxo pipefail
+          set -euo pipefail
           HDRS=(-H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github+json" \
                 -H "X-GitHub-Api-Version: 2022-11-28")
-
+      
           repo="${EPLUS_REPO}"
           min_tag="${MIN_TAG}"
-
-          # jq helpers
-          read -r -d '' JQ_FUNCS <<'JQ'
+      
+          # jq helpers (NO read -d '')
+          JQ_FUNCS=$(cat <<'JQ'
           def ver($s):
             ($s|ltrimstr("v")) as $v
             | if ($v|test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) then
                 ($v|split(".")|map(tonumber))
               else null end;
-
+      
           def best_ubuntu($assets):
             if [ $assets[]? | select(.name? | test("Ubuntu24\\.04";"i")) ]|length>0 then "24.04"
             elif [ $assets[]? | select(.name? | test("Ubuntu22\\.04";"i")) ]|length>0 then "22.04"
@@ -70,24 +70,22 @@ jobs:
             elif [ $assets[]? | select(.name? | test("Ubuntu18\\.04";"i")) ]|length>0 then "18.04"
             else "24.04" end;
           JQ
-
+          )
+      
           tmp=$(mktemp); : > "$tmp"
           page=1
           while :; do
             url="https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}"
             echo "Fetching $url" >&2
             resp=$(curl -fsSL "${HDRS[@]}" "$url") || { echo "curl failed for $url"; exit 1; }
-            n=$(jq 'length' <<<"$resp" || echo 0)
-            [[ "${n:-0}" -eq 0 ]] && break
+            n=$(jq 'length' <<<"$resp")
+            [[ "$n" -eq 0 ]] && break
             jq '.[] | select(.draft==false and .prerelease==false)' <<<"$resp" >> "$tmp"
             page=$((page+1))
           done
-
-          if [[ ! -s "$tmp" ]]; then
-            echo "No releases returned; check token/permissions/rate limit."
-            exit 1
-          fi
-
+      
+          [[ -s "$tmp" ]] || { echo "No releases returned"; exit 1; }
+      
           base=$(jq -cs --arg min "$min_tag" "$JQ_FUNCS
             [ inputs ]
             | map({ tag: .tag_name, assets: .assets })
@@ -103,8 +101,7 @@ jobs:
             | map(select(.has_amd64 or .has_arm64))
             | sort_by( ver(.tag) ) | reverse
           " "$tmp")
-
-          # Build matrix by Python list
+      
           rows=()
           latest_tag=$(jq -r '.[0].tag // empty' <<<"$base")
           for tag in $(jq -r '.[].tag' <<<"$base"); do
@@ -113,7 +110,7 @@ jobs:
             has_arm64=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.has_arm64' <<<"$base")
             amd64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.amd64_url // empty' <<<"$base")
             arm64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.arm64_url // empty' <<<"$base")
-
+      
             if [[ "$has_amd64" == "true" && "$has_arm64" == "true" ]]; then
               plats="$PLAT_BOTH"
             elif [[ "$has_arm64" == "true" ]]; then
@@ -121,18 +118,18 @@ jobs:
             else
               plats="linux/amd64"
             fi
-
+      
             for py in ${PY_LIST}; do
               rows+=( "$(jq -n --arg tag "$tag" --arg ubuntu "$ubuntu" --arg plats "$plats" \
                             --arg py "$py" --arg amd "$amd64_url" --arg arm "$arm64_url" \
                             '{tag:$tag, ubuntu:$ubuntu, platforms:$plats, python_version:$py, amd64_url:$amd, arm64_url:$arm}')" )
             done
           done
-
+      
           matrix=$(jq -cs '.' < <(printf '%s\n' "${rows[@]}"))
           echo "matrix=$(jq -c <<<"$matrix")" >> "$GITHUB_OUTPUT"
           echo "latest_image_tag=${latest_tag}-py${DEFAULT_PY}-ubuntu${DEFAULT_UBU}" >> "$GITHUB_OUTPUT"
-
+      
       - name: Preview matrix
         run: |
           echo '${{ steps.out.outputs.matrix }}' | jq -r '
