@@ -26,10 +26,6 @@ permissions:
   contents: read
   packages: write
 
-concurrency:
-  group: build-dask-energyplus-${{ github.ref }}-py${{ matrix.python-version }}
-  cancel-in-progress: false
-
 jobs:
   build-push:
     name: Build & push (py ${{ matrix.python-version }})
