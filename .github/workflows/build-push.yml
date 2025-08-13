@@ -12,7 +12,7 @@ on:
 
 env:
   # Where to push (Docker Hub by default). For GHCR, set IMAGE_NAME=ghcr.io/<owner>/dask-energyplus and adjust login step.
-  IMAGE_NAME: yourorg/dask-energyplus
+  IMAGE_NAME: carbon-signal/dask-energyplus
 
   # Upstream repo and minimum version to include
   EPLUS_REPO: NREL/EnergyPlus
