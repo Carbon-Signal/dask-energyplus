@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.7
+# Lean, multi-arch, Python via uv, installer mounted (not copied)
 
 ARG UBUNTU_VERSION=24.04
 ARG PYTHON_VERSION=3.11
@@ -7,16 +8,28 @@ FROM --platform=$TARGETPLATFORM ubuntu:${UBUNTU_VERSION}
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
-# Base runtime (no 'expect' here—keep it out of the final layer)
+# Base runtime: only what we actually need
 RUN --mount=type=cache,target=/var/cache/apt \
-    apt-get update && \
+    set -eux; \
+    apt-get update; \
     apt-get install -y --no-install-recommends \
       ca-certificates curl \
-      python${PYTHON_VERSION} python${PYTHON_VERSION}-distutils python3-pip \
-      libgomp1 libx11-6 && \
+      libgomp1 libx11-6; \
     rm -rf /var/lib/apt/lists/*
 
-# Run the EnergyPlus installer with a bind-mount + Dockerfile heredoc
+# Install the uv toolchain manager, then install CPython ${PYTHON_VERSION}
+# and make it the system default (python, python3, python${PYTHON_VERSION})
+RUN set -eux; \
+    curl -fsSL https://astral.sh/uv/install.sh | sh -s -- -y; \
+    ln -sf /root/.local/bin/uv /usr/local/bin/uv; \
+    uv python install ${PYTHON_VERSION}; \
+    PYBIN="$(uv python find ${PYTHON_VERSION})"; \
+    ln -sf "$PYBIN" /usr/local/bin/python${PYTHON_VERSION}; \
+    ln -sf "$PYBIN" /usr/local/bin/python3; \
+    ln -sf "$PYBIN" /usr/local/bin/python; \
+    "$PYBIN" -VV
+
+# Run the EnergyPlus .sh installer with BuildKit bind-mount + Dockerfile heredoc
 RUN --mount=type=cache,target=/var/cache/apt \
     --mount=type=bind,source=energyplus-installer.sh,target=/tmp/energyplus-installer.sh \
 <<'BASH'
@@ -41,6 +54,17 @@ rm -f /tmp/install.exp
 rm -rf /var/lib/apt/lists/*
 BASH
 
-# Dask on the chosen Python
-RUN python${PYTHON_VERSION} -m pip install --upgrade pip && \
-    python${PYTHON_VERSION} -m pip install "dask[distributed]"
+# Install Dask into the uv-provisioned Python (no system python needed)
+RUN set -eux; \
+    PYBIN="$(uv python find ${PYTHON_VERSION})"; \
+    "$PYBIN" -m ensurepip --upgrade; \
+    "$PYBIN" -m pip install --upgrade pip; \
+    "$PYBIN" -m pip install "dask[distributed]"
+
+# Optional: non-root user
+RUN useradd -ms /bin/bash app && chown -R app:app /usr/local
+USER app
+WORKDIR /home/app
+
+# Default command
+CMD ["python", "-c", "import sys, dask, distributed; print('Python:', sys.version)"]
