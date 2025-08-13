@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: Carbon-Signal/dask-energyplus
+  IMAGE_NAME: ghcr.io/Carbon-Signal/dask-energyplus
   UBUNTU_DEFAULT: 24.04
   PY_LIST: "3.9 3.10 3.11 3.12 3.13"
   TAG_LIST: "v25.1.0 v24.2.0 v24.1.0 v23.2.0 v23.1.0 v22.2.0 v22.1.0 v9.6.0"
