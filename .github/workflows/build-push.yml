@@ -1,252 +1,73 @@
-name: Discover, Build & Push EnergyPlus Images
+name: Build & Push for Specific E+ Tags
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
-    inputs:
-      push_latest:
-        type: boolean
-        default: true
-        description: "Also retag :latest to the highest discovered tag (default Python/Ubuntu)?"
 
 env:
-  # Where to push (Docker Hub by default). For GHCR, set IMAGE_NAME=ghcr.io/<owner>/dask-energyplus and adjust login step.
-  IMAGE_NAME: carbon-signal/dask-energyplus
-
-  # Upstream repo and minimum version to include
-  EPLUS_REPO: NREL/EnergyPlus
-  MIN_TAG: v9.5.0
-
-  # Python versions to build for (space-separated)
+  IMAGE_NAME: Carbon-Signal/dask-energyplus
+  UBUNTU_DEFAULT: 24.04
   PY_LIST: "3.9 3.10 3.11 3.12 3.13"
-
-  # Defaults used for :latest selection
-  DEFAULT_PY: "3.11"
-  DEFAULT_UBU: "24.04"
-
-  # When both arches exist for a tag, build these platforms
+  TAG_LIST: "v25.1.0 v24.2.0 v24.1.0 v23.2.0 v23.1.0 v22.2.0 v22.1.0 v9.6.0"
   PLAT_BOTH: linux/amd64,linux/arm64
 
 jobs:
-  discover:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.out.outputs.matrix }}
-      latest_image_tag: ${{ steps.out.outputs.latest_image_tag }}
-    steps:
-      - name: Prep tools
-        run: |
-          set -eux
-          sudo apt-get update
-          sudo apt-get install -y jq curl
-
-      - name: Gather releases and build matrix
-        id: out
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          HDRS=(-H "Authorization: Bearer $GH_TOKEN" \
-                -H "Accept: application/vnd.github+json" \
-                -H "X-GitHub-Api-Version: 2022-11-28")
-      
-          repo="${EPLUS_REPO}"
-          min_tag="${MIN_TAG}"
-      
-          # jq helpers (NO read -d '')
-          JQ_FUNCS=$(cat <<'JQ'
-          def ver($s):
-            ($s|ltrimstr("v")) as $v
-            | if ($v|test("^[0-9]+\\.[0-9]+\\.[0-9]+$")) then
-                ($v|split(".")|map(tonumber))
-              else null end;
-      
-          def best_ubuntu($assets):
-            if [ $assets[]? | select(.name? | test("Ubuntu24\\.04";"i")) ]|length>0 then "24.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu22\\.04";"i")) ]|length>0 then "22.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu20\\.04";"i")) ]|length>0 then "20.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu18\\.04";"i")) ]|length>0 then "18.04"
-            else "24.04" end;
-          JQ
-          )
-      
-          tmp=$(mktemp); : > "$tmp"
-          page=1
-          while :; do
-            url="https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}"
-            echo "Fetching $url" >&2
-            resp=$(curl -fsSL "${HDRS[@]}" "$url") || { echo "curl failed for $url"; exit 1; }
-            n=$(jq 'length' <<<"$resp")
-            [[ "$n" -eq 0 ]] && break
-            jq '.[] | select(.draft==false and .prerelease==false)' <<<"$resp" >> "$tmp"
-            page=$((page+1))
-          done
-      
-          [[ -s "$tmp" ]] || { echo "No releases returned"; exit 1; }
-      
-          # Build `base` without letting Bash expand $min or other jq vars
-          base="$(jq -cs --arg min "$min_tag" -f /dev/stdin "$tmp" <<'JQ'
-          def ver($s):
-            ($s|ltrimstr("v")) as $v
-            | if ($v|test("^[0-9]+[.][0-9]+[.][0-9]+$")) then
-                ($v|split(".")|map(tonumber))
-              else null end;
-          
-          def best_ubuntu($assets):
-            if   [ $assets[]? | select(.name? | test("Ubuntu24[.]04";"i")) ]|length>0 then "24.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu22[.]04";"i")) ]|length>0 then "22.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu20[.]04";"i")) ]|length>0 then "20.04"
-            elif [ $assets[]? | select(.name? | test("Ubuntu18[.]04";"i")) ]|length>0 then "18.04"
-            else "24.04" end;
-          
-          [ inputs ]
-          | map({ tag: .tag_name, assets: .assets })
-          | map(select(ver(.tag) != null and ver(.tag) >= ver($min)))
-          | map({
-              tag,
-              ubuntu: best_ubuntu(.assets),
-              has_amd64: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(x86_64|amd64)[.]sh$";"i")) ] | length > 0 ),
-              has_arm64: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(arm64|aarch64)[.]sh$";"i")) ] | length > 0 ),
-              amd64_url: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(x86_64|amd64)[.]sh$";"i")) | .browser_download_url ] | first ),
-              arm64_url: ( [ .assets[]? | select(.name? | test("^EnergyPlus-.*-Linux-.*(arm64|aarch64)[.]sh$";"i")) | .browser_download_url ] | first )
-            })
-          | map(select(.has_amd64 or .has_arm64))
-          | sort_by( ver(.tag) ) | reverse
-          JQ
-          )"
-          
-          rows=()
-          latest_tag=$(jq -r '.[0].tag // empty' <<<"$base")
-          for tag in $(jq -r '.[].tag' <<<"$base"); do
-            ubuntu=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.ubuntu' <<<"$base")
-            has_amd64=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.has_amd64' <<<"$base")
-            has_arm64=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.has_arm64' <<<"$base")
-            amd64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.amd64_url // empty' <<<"$base")
-            arm64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.arm64_url // empty' <<<"$base")
-      
-            if [[ "$has_amd64" == "true" && "$has_arm64" == "true" ]]; then
-              plats="$PLAT_BOTH"
-            elif [[ "$has_arm64" == "true" ]]; then
-              plats="linux/arm64"
-            else
-              plats="linux/amd64"
-            fi
-      
-            for py in ${PY_LIST}; do
-              rows+=( "$(jq -n --arg tag "$tag" --arg ubuntu "$ubuntu" --arg plats "$plats" \
-                            --arg py "$py" --arg amd "$amd64_url" --arg arm "$arm64_url" \
-                            '{tag:$tag, ubuntu:$ubuntu, platforms:$plats, python_version:$py, amd64_url:$amd, arm64_url:$arm}')" )
-            done
-          done
-      
-          matrix=$(jq -cs '.' < <(printf '%s\n' "${rows[@]}"))
-          echo "matrix=$(jq -c <<<"$matrix")" >> "$GITHUB_OUTPUT"
-          echo "latest_image_tag=${latest_tag}-py${DEFAULT_PY}-ubuntu${DEFAULT_UBU}" >> "$GITHUB_OUTPUT"
-      
-      - name: Preview matrix
-        run: |
-          echo '${{ steps.out.outputs.matrix }}' | jq -r '
-            ["tag","ubuntu","python","platforms"],
-            (.[] | [ .tag, .ubuntu, .python_version, .platforms ])
-          | @tsv' | column -t
-
   build:
-    name: Build & Push per tag/python
-    needs: [ discover ]
-    if: ${{ fromJSON(needs.discover.outputs.matrix) != null && needs.discover.outputs.matrix != '' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.discover.outputs.matrix) }}
+        include:
+          - { tag: v25.1.0, ubuntu: "24.04" }
+          - { tag: v24.2.0, ubuntu: "22.04" }
+          - { tag: v24.1.0, ubuntu: "22.04" }
+          - { tag: v23.2.0, ubuntu: "22.04" }
+          - { tag: v23.1.0, ubuntu: "22.04" }
+          - { tag: v22.2.0, ubuntu: "22.04" }
+          - { tag: v22.1.0, ubuntu: "22.04" }
+          - { tag: v9.6.0, ubuntu: "20.04" }
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      # Docker Hub login (swap for GHCR if needed)
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Download the installer that matches the arch being built.
-      # We do two builds when both platforms exist; the step below chooses the correct URL per arch.
-      - name: Prepare installer for this build
-        id: dl
-        shell: bash
+      - name: Fetch installer URL for tag
+        id: fetch-url
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-
-          # Pick one URL to download into build context if both exist.
-          # We don't know the specific arch here because buildx builds both in parallel;
-          # so we save *both* URLs and the Dockerfile will mount 'energyplus-installer.sh'.
-          # We'll download one now based on a priority order (arm64 if only arm64; else amd64).
-          AMD="${{ matrix.amd64_url }}"
-          ARM="${{ matrix.arm64_url }}"
-
-          if [[ -n "$AMD" && -n "$ARM" ]]; then
-            # Default to AMD for the artifact we place in context (either works for bind-mount naming).
-            URL="$AMD"
-          elif [[ -n "$AMD" ]]; then
-            URL="$AMD"
-          elif [[ -n "$ARM" ]]; then
-            URL="$ARM"
-          else
-            echo "No installer URLs available for tag ${{ matrix.tag }}"
+          API="https://api.github.com/repos/NREL/EnergyPlus/releases/tags/${{ matrix.tag }}"
+          URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" "$API" \
+            | jq -r '.assets[] 
+              | select(.name | test("^EnergyPlus-.*-Linux-Ubuntu${{ matrix.ubuntu }}-.*(x86_64|amd64)\\.sh$") 
+                      or test("^EnergyPlus-.*-Linux-Ubuntu${{ matrix.ubuntu }}-.*(arm64|aarch64)\\.sh$")) 
+              | .browser_download_url' \
+            | head -n1)
+          if [ -z "$URL" ]; then
+            echo "No matching installer found for tag=${{ matrix.tag }}, ubuntu=${{ matrix.ubuntu }}"
             exit 1
           fi
-
           echo "url=$URL" >> "$GITHUB_OUTPUT"
-          curl -fsSL "$URL" -o energyplus-installer.sh
+
+      - name: Download installer
+        run: |
+          curl -fsSL "${{ steps.fetch-url.outputs.url }}" -o energyplus-installer.sh
           chmod +x energyplus-installer.sh
 
-      - name: Compute image tags
-        id: meta
+      - name: Build & push for each Python version
         run: |
-          set -euo pipefail
-          TAG="${{ matrix.tag }}"
-          UB="${{ matrix.ubuntu }}"
-          PY="${{ matrix.python_version }}"
-          # main tag includes py + ubuntu
-          MAIN="${IMAGE_NAME}:${TAG}-py${PY}-ubuntu${UB}"
-          echo "tags=$MAIN" >> "$GITHUB_OUTPUT"
-
-      - name: Build & push (per row platforms)
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: ${{ matrix.platforms }}
-          build-args: |
-            UBUNTU_VERSION=${{ matrix.ubuntu }}
-            PYTHON_VERSION=${{ matrix.python_version }}
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
-
-  retag-latest:
-    name: Retag :latest
-    needs: [ discover, build ]
-    if: ${{ (github.event_name == 'push' || github.event.inputs.push_latest == 'true') && needs.discover.outputs.latest_image_tag != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: docker/setup-buildx-action@v3
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Point :latest to highest (default Python/Ubuntu)
-        run: |
-          docker buildx imagetools create \
-            --tag ${IMAGE_NAME}:latest \
-            ${IMAGE_NAME}:${{ needs.discover.outputs.latest_image_tag }}
+          for PY in $PY_LIST; do
+            docker buildx build \
+              --platform $PLAT_BOTH \
+              --push \
+              --file Dockerfile \
+              --build-arg UBUNTU_VERSION=${{ matrix.ubuntu }} \
+              --build-arg PYTHON_VERSION=$PY \
+              --tag ${IMAGE_NAME}:${{ matrix.tag }}-py${PY}-ubuntu${{ matrix.ubuntu }} \
+              .
+          done
