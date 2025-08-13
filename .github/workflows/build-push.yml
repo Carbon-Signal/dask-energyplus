@@ -1,98 +1,127 @@
-name: Build & Push dask-energyplus to GHCR (multi-arch, Python matrix)
+name: Build and publish multi-arch image
 
 on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       eplus_tag:
-        description: "EnergyPlus release tag to install (e.g., v25.1.0)"
+        description: "EnergyPlus release tag (e.g., v25.1.0)"
         required: false
         default: "v25.1.0"
-      image_tag:
-        description: "Primary image tag (e.g., 25.1)"
+      python_version:
+        description: "Python version"
         required: false
-        default: "25.1"
-      push_latest:
-        description: "Also push :latest (only for default Python)?"
-        type: boolean
+        default: "3.11"
+      miniforge_version:
+        description: "Miniforge release (e.g., 24.7.1-0)"
         required: false
-        default: false
-  push:
-    branches: [ main ]
-    paths:
-      - "Dockerfile"
-      - ".github/workflows/build-push.yml"
+        default: "24.7.1-0"
+      eplus_url:
+        description: "Override EnergyPlus installer URL"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
 
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
-  build-push:
-    name: Build & push (py ${{ matrix.python-version }})
+  docker:
+    name: Buildx multi-arch
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix:
-        # Adjust versions here
-        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13" ]
-
-    env:
-      # Controls which Python gets the un-suffixed tags (:25.1, :v25.1.0, :latest)
-      DEFAULT_PY: "3.12"
-      EPLUS_TAG: ${{ inputs.eplus_tag || 'v25.1.0' }}
-      IMAGE_TAG: ${{ inputs.image_tag || '25.1' }}
-
     steps:
-      - name: Checkout
+      - name: checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch)
+      - name: Compute image name (lowercase)
+        id: repo
+        run: |
+          IMAGE="${{ env.REGISTRY }}/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,amd64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to container registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image and tags
-        id: tags
-        run: |
-          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          IMAGE="ghcr.io/${OWNER_LC}/dask-energyplus"
-          PY="${{ matrix.python-version }}"
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ steps.repo.outputs.image }}
+          tags: |
+            # Tag main as "latest"
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            # Tag with Git SHA
+            type=sha,format=long,prefix=sha-
+            # Semver tags for releases like v1.2.3
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
 
-          # Always publish Python-suffixed tags for each matrix variant
-          TAGS="${IMAGE}:${IMAGE_TAG}-py${PY},${IMAGE}:${EPLUS_TAG}-py${PY}"
-
-          # Only the default Python gets the bare tags (avoid collisions)
-          if [ "${PY}" = "${DEFAULT_PY}" ]; then
-            if [ "${{ inputs.push_latest }}" = "true" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
-              TAGS="${TAGS},${IMAGE}:${IMAGE_TAG},${IMAGE}:${EPLUS_TAG},${IMAGE}:latest"
-            fi
-          fi
-
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-          echo "tags=${TAGS}"   >> "$GITHUB_OUTPUT"
-
-      - name: Build & Push (linux/amd64, linux/arm64)
-        uses: docker/build-push-action@v5
+      - name: Build and push (amd64 + arm64)
+        id: buildx
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.tags.outputs.tags }}
-          build-args: |
-            EPLUS_TAG=${{ env.EPLUS_TAG }}
-            PYTHON_VERSION=${{ matrix.python-version }}
-            # Used by your Dockerfile to avoid GH API rate limits when fetching EnergyPlus assets
-            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false
+          # Enable provenance/SBOM attestation (BuildKit)
+          provenance: true
+          sbom: true
+          build-args: |
+            # Defaults can be overridden via workflow_dispatch inputs or repo/environment variables
+            EPLUS_TAG=${{ github.event_name == 'workflow_dispatch' && inputs.eplus_tag || (vars.EPLUS_TAG || 'v25.1.0') }}
+            PYTHON_VERSION=${{ github.event_name == 'workflow_dispatch' && inputs.python_version || (vars.PYTHON_VERSION || '3.11') }}
+            MINIFORGE_VERSION=${{ github.event_name == 'workflow_dispatch' && inputs.miniforge_version || (vars.MINIFORGE_VERSION || '24.7.1-0') }}
+            # Forward token for GitHub API rate limiting (used at build-time to fetch EnergyPlus release assets)
+            GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
+            # Optional override for a specific EnergyPlus installer URL
+            EPLUS_URL=${{ github.event_name == 'workflow_dispatch' && inputs.eplus_url || (vars.EPLUS_URL || '') }}
+
+      - name: Smoke test (amd64)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -eux
+          # Prefer the first computed tag for convenience
+          TAG="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          docker run --rm --platform linux/amd64 "$TAG" energyplus --version
+
+      - name: Smoke test (arm64 via QEMU)
+        if: github.event_name != 'pull_request'
+        run: |
+          set -eux
+          TAG="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          docker run --rm --platform linux/arm64 "$TAG" energyplus --version
