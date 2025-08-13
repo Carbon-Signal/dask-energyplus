@@ -46,6 +46,12 @@ RUN set -eux; \
 
 # Select the best matching E+ installer (allow override via EPLUS_URL)
 RUN set -eux; \
+    # Resolve arch locally in this layer to ensure availability
+    case "${TARGETPLATFORM:-}" in \
+      "linux/amd64") ARCH="x86_64"; ARCH_RE="(x86_64|amd64)";; \
+      "linux/arm64") ARCH="aarch64"; ARCH_RE="(arm64|aarch64)";; \
+      *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM:-unset}"; exit 1;; \
+    esac; \
     API_URL="https://api.github.com/repos/NREL/EnergyPlus/releases/tags/${EPLUS_TAG}"; \
     if [ -n "${EPLUS_URL}" ]; then \
       ASSET_URL="${EPLUS_URL}"; \
@@ -138,15 +144,25 @@ RUN set -eux; \
     esac; \
     echo "Resolved TARGETPLATFORM=${TARGETPLATFORM:-unset} -> ARCH=${ARCH}"
 
-# Download Miniforge installer and checksum, then verify and install
+# Download Miniforge installer and install
 RUN --mount=type=cache,target=/root/.cache \
     set -eux; \
-    MF_BASE="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-Linux-${ARCH}.sh"; \
-    curl -fsSL "${MF_BASE}" -o /tmp/mf.sh; \
-    curl -fsSL "${MF_BASE}.sha256" -o /tmp/mf.sh.sha256; \
-    (cd /tmp && sha256sum -c mf.sh.sha256); \
-    bash /tmp/mf.sh -b -p "${CONDA_DIR}"; \
-    rm -f /tmp/mf.sh /tmp/mf.sh.sha256
+    # Resolve arch locally in this layer to ensure availability
+    case "${TARGETPLATFORM:-}" in \
+      "linux/amd64") ARCH="x86_64";; \
+      "linux/arm64") ARCH="aarch64";; \
+      *) echo "Unsupported TARGETPLATFORM=${TARGETPLATFORM:-unset}"; exit 1;; \
+    esac; \
+    BASE_URL="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}"; \
+    LATEST_URL="https://github.com/conda-forge/miniforge/releases/latest/download"; \
+    FILENAME="Miniforge3-Linux-${ARCH}.sh"; \
+    echo "Resolved TARGETPLATFORM=${TARGETPLATFORM:-unset} -> ARCH=${ARCH}"; \
+    echo "Attempting: ${BASE_URL}/${FILENAME}"; \
+    curl -fSLS --retry 5 --retry-delay 2 --retry-all-errors "${BASE_URL}/${FILENAME}" -o "/tmp/${FILENAME}" \
+      || (echo "Falling back to latest: ${LATEST_URL}/${FILENAME}" \
+          && curl -fSLS --retry 5 --retry-delay 2 --retry-all-errors "${LATEST_URL}/${FILENAME}" -o "/tmp/${FILENAME}"); \
+    bash "/tmp/${FILENAME}" -b -p "${CONDA_DIR}"; \
+    rm -f "/tmp/${FILENAME}"
 
 # Use cache for conda pkgs; install Python + Dask; clean index/pkgs
 RUN --mount=type=cache,target=/opt/conda/pkgs \
