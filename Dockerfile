@@ -6,6 +6,7 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TARGETARCH
 ARG EPLUS_TAG=v25.1.0
+ARG PYTHON_VERSION=3.11
 
 # Base deps + Miniforge (for Python + Dask) + runtime libs for E+
 RUN set -eux; \
@@ -15,14 +16,14 @@ RUN set -eux; \
       libgomp1 libx11-6 file; \
     rm -rf /var/lib/apt/lists/*
 
-# Install Miniforge and Dask (you can pin versions as needed)
+# Install Miniforge and Dask
 ENV CONDA_DIR=/opt/conda
 ENV PATH=$CONDA_DIR/bin:$PATH
 RUN set -eux; \
     ARCH="$(case "$TARGETARCH" in amd64) echo x86_64 ;; arm64) echo aarch64 ;; *) echo "bad arch"; exit 1;; esac)"; \
     curl -fsSL "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-${ARCH}.sh" -o /tmp/mf.sh; \
     bash /tmp/mf.sh -b -p "$CONDA_DIR"; rm -f /tmp/mf.sh; \
-    conda install -y -c conda-forge python=3.11 dask distributed && conda clean -afy
+    conda install -y -c conda-forge python=${PYTHON_VERSION} dask distributed && conda clean -afy
 
 # Resolve correct Linux installer for this arch (Ubuntu-first)
 RUN set -eux; \
@@ -55,15 +56,12 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Non-executing sanity check (safe under cross-arch builds)
-# --- Robust, arch-aware sanity check (no execution under cross-arch) ---
 ARG TARGETARCH
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
 RUN set -eux; \
-    # Resolve to a real file (follow symlinks)
     WRAP="$(command -v energyplus)"; \
     BIN="$(readlink -f "$WRAP")"; \
-    # If this isn't an ELF (some packages ship a wrapper), try the sibling 'energyplus' in the install dir
     INFO="$(file -b "$BIN" || true)"; \
     if ! echo "$INFO" | grep -qi 'ELF 64-bit'; then \
       CANDIDATE="$(dirname "$BIN")/energyplus"; \
@@ -74,7 +72,6 @@ RUN set -eux; \
     fi; \
     echo "energyplus resolved to: $BIN"; \
     echo "file(1): $INFO"; \
-    # Only enforce arch check if we really found an ELF; otherwise just warn
     if echo "$INFO" | grep -qi 'ELF 64-bit'; then \
       case "$TARGETARCH" in \
         amd64)  echo "$INFO" | grep -qiE 'x86-64|x86_64'  || { echo "Expected amd64 ELF"; exit 1; } ;; \
@@ -84,7 +81,6 @@ RUN set -eux; \
     else \
       echo "Warning: energyplus is not an ELF (likely a wrapper). Skipping ELF arch check."; \
     fi; \
-    # Only execute the binary if build and target match
     if [ "${BUILDPLATFORM:-}" = "${TARGETPLATFORM:-}" ]; then \
       energyplus --version >/dev/null; \
     else \
