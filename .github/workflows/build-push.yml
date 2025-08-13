@@ -30,12 +30,17 @@ env:
 
 jobs:
   discover:
-    name: Discover supported tags, platforms, Ubuntu base
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.out.outputs.matrix }}
       latest_image_tag: ${{ steps.out.outputs.latest_image_tag }}
     steps:
+      - name: Prep tools
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y jq curl
+
       - name: Gather releases and build matrix
         id: out
         shell: bash
@@ -43,12 +48,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
+          HDRS=(-H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28")
 
           repo="${EPLUS_REPO}"
           min_tag="${MIN_TAG}"
-          py_list="${PY_LIST}"
 
-          # jq helpers: semver parsing/compare
+          # jq helpers
           read -r -d '' JQ_FUNCS <<'JQ'
           def ver($s):
             ($s|ltrimstr("v")) as $v
@@ -64,23 +71,26 @@ jobs:
             else "24.04" end;
           JQ
 
-          # Fetch all non-draft, non-prerelease releases (paginate)
-          tmp=$(mktemp)
-          : > "$tmp"
+          tmp=$(mktemp); : > "$tmp"
           page=1
           while :; do
-            resp=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}")
-            n=$(jq 'length' <<<"$resp")
-            [[ "$n" -eq 0 ]] && break
+            url="https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}"
+            echo "Fetching $url" >&2
+            resp=$(curl -fsSL "${HDRS[@]}" "$url") || { echo "curl failed for $url"; exit 1; }
+            n=$(jq 'length' <<<"$resp" || echo 0)
+            [[ "${n:-0}" -eq 0 ]] && break
             jq '.[] | select(.draft==false and .prerelease==false)' <<<"$resp" >> "$tmp"
             page=$((page+1))
           done
 
-          # Reduce to rows with tag, platforms, ubuntu, and asset_url per arch
-          base=$(jq -cs --arg min "$min_tag" --arg plat_both "$PLAT_BOTH" "$JQ_FUNCS
+          if [[ ! -s "$tmp" ]]; then
+            echo "No releases returned; check token/permissions/rate limit."
+            exit 1
+          fi
+
+          base=$(jq -cs --arg min "$min_tag" "$JQ_FUNCS
             [ inputs ]
-            | map({ tag: .tag_name, assets: .assets, published_at })
+            | map({ tag: .tag_name, assets: .assets })
             | map(select(ver(.tag) != null and ver(.tag) >= ver($min)))
             | map({
                 tag,
@@ -91,22 +101,19 @@ jobs:
                 arm64_url: ( [ .assets[]? | select(.name? | test(\"^EnergyPlus-.*-Linux-.*(arm64|aarch64)\\.sh$\";\"i\")) | .browser_download_url ] | first )
               })
             | map(select(.has_amd64 or .has_arm64))
-            | sort_by(ver(.tag)) | reverse
+            | sort_by( ver(.tag) ) | reverse
           " "$tmp")
 
-          # Expand per-python row; set platforms according to availability
+          # Build matrix by Python list
           rows=()
-          latest_tag=""
-          while IFS= read -r tag; do
-            # pick ubuntu + arch support + urls for this tag
-            row=$(jq -r --arg t "$tag" '.[] | select(.tag==$t)' <<<"$base")
-            ubuntu=$(jq -r '.ubuntu' <<<"$row")
-            has_amd64=$(jq -r '.has_amd64' <<<"$row")
-            has_arm64=$(jq -r '.has_arm64' <<<"$row")
-            amd64_url=$(jq -r '.amd64_url // empty' <<<"$row")
-            arm64_url=$(jq -r '.arm64_url // empty' <<<"$row")
+          latest_tag=$(jq -r '.[0].tag // empty' <<<"$base")
+          for tag in $(jq -r '.[].tag' <<<"$base"); do
+            ubuntu=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.ubuntu' <<<"$base")
+            has_amd64=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.has_amd64' <<<"$base")
+            has_arm64=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.has_arm64' <<<"$base")
+            amd64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.amd64_url // empty' <<<"$base")
+            arm64_url=$(jq -r --arg t "$tag" '.[]|select(.tag==$t)|.arm64_url // empty' <<<"$base")
 
-            # platforms for this tag
             if [[ "$has_amd64" == "true" && "$has_arm64" == "true" ]]; then
               plats="$PLAT_BOTH"
             elif [[ "$has_arm64" == "true" ]]; then
@@ -115,33 +122,18 @@ jobs:
               plats="linux/amd64"
             fi
 
-            for py in $py_list; do
-              # choose the URL we will download into the build context (arch-specific handled by buildx per platform)
-              # We pass the *pair* of URLs; the build step will pick per-arch before download.
-              rows+=( "$(jq -n --arg tag "$tag" --arg ubuntu "$ubuntu" \
-                             --arg plats "$plats" --arg py "$py" \
-                             --arg amd "$amd64_url" --arg arm "$arm64_url" \
-                       '{tag:$tag, ubuntu:$ubuntu, platforms:$plats, python_version:$py, amd64_url:$amd, arm64_url:$arm}')" )
+            for py in ${PY_LIST}; do
+              rows+=( "$(jq -n --arg tag "$tag" --arg ubuntu "$ubuntu" --arg plats "$plats" \
+                            --arg py "$py" --arg amd "$amd64_url" --arg arm "$arm64_url" \
+                            '{tag:$tag, ubuntu:$ubuntu, platforms:$plats, python_version:$py, amd64_url:$amd, arm64_url:$arm}')" )
             done
-
-            [[ -z "$latest_tag" ]] && latest_tag="$tag"
-          done < <(jq -r '.[].tag' <<<"$base")
+          done
 
           matrix=$(jq -cs '.' < <(printf '%s\n' "${rows[@]}"))
-
-          echo "Discovered rows: $(jq 'length' <<<"$matrix")"
-          echo "Latest tag (highest semver): ${latest_tag:-<none>}"
-
-          # For :latest, choose DEFAULT_PY and DEFAULT_UBU combination
-          latest_image_tag=""
-          if [[ -n "$latest_tag" ]]; then
-            latest_image_tag="${latest_tag}-py${DEFAULT_PY}-ubuntu${DEFAULT_UBU}"
-          fi
-
           echo "matrix=$(jq -c <<<"$matrix")" >> "$GITHUB_OUTPUT"
-          echo "latest_image_tag=$latest_image_tag" >> "$GITHUB_OUTPUT"
+          echo "latest_image_tag=${latest_tag}-py${DEFAULT_PY}-ubuntu${DEFAULT_UBU}" >> "$GITHUB_OUTPUT"
 
-      - name: Show matrix (preview)
+      - name: Preview matrix
         run: |
           echo '${{ steps.out.outputs.matrix }}' | jq -r '
             ["tag","ubuntu","python","platforms"],
