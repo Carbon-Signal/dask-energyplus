@@ -43,7 +43,7 @@ jobs:
 
     env:
       # Controls which Python gets the un-suffixed tags (:25.1, :v25.1.0, :latest)
-      DEFAULT_PY: "3.11"
+      DEFAULT_PY: "3.12"
       EPLUS_TAG: ${{ inputs.eplus_tag || 'v25.1.0' }}
       IMAGE_TAG: ${{ inputs.image_tag || '25.1' }}
 
