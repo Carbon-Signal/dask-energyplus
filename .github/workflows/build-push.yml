@@ -42,7 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
           repo="${EPLUS_REPO}"
           min_tag="${MIN_TAG}"
