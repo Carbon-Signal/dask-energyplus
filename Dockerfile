@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
 RUN --mount=type=bind,source=energyplus-installer.sh,target=/tmp/energyplus-installer.sh \
     bash -euxo pipefail -c '\
       chmod +x /tmp/energyplus-installer.sh && \
-      cat > /tmp/install.exp <<EOF %% \
+      cat > /tmp/install.exp <<EOF && \
 set timeout -1
 spawn /tmp/energyplus-installer.sh
 expect -re {Do you accept the license.*:}
@@ -30,8 +30,8 @@ expect -re {Symbolic link location.*:}
 send "\r"
 expect eof
 EOF
-      expect /tmp/install.exp %% \
-      apt-get purge -y --auto-remove expect %% \
+      expect /tmp/install.exp && \
+      apt-get purge -y --auto-remove expect && \
       rm -f /tmp/install.exp \
     '
 
