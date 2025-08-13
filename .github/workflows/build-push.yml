@@ -1,4 +1,4 @@
-name: Build & Push dask-energyplus to GHCR (multi-arch)
+name: Build & Push dask-energyplus to GHCR (multi-arch, Python matrix)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
         required: false
         default: "25.1"
       push_latest:
-        description: "Also push :latest?"
+        description: "Also push :latest (only for default Python)?"
         type: boolean
         required: false
         default: false
@@ -20,19 +20,30 @@ on:
     branches: [ main ]
     paths:
       - "Dockerfile"
+      - ".github/workflows/build-push.yml"
 
 permissions:
   contents: read
   packages: write
 
 concurrency:
-  group: build-dask-energyplus-${{ github.ref }}
+  group: build-dask-energyplus-${{ github.ref }}-py${{ matrix.python-version }}
   cancel-in-progress: false
 
 jobs:
   build-push:
+    name: Build & push (py ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Adjust versions here
+        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13" ]
+
     env:
+      # Controls which Python gets the un-suffixed tags (:25.1, :v25.1.0, :latest)
+      DEFAULT_PY: "3.11"
       EPLUS_TAG: ${{ inputs.eplus_tag || 'v25.1.0' }}
       IMAGE_TAG: ${{ inputs.image_tag || '25.1' }}
 
@@ -53,15 +64,23 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image name and tags
+      - name: Compute image and tags
         id: tags
         run: |
           OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
           IMAGE="ghcr.io/${OWNER_LC}/dask-energyplus"
-          TAGS="${IMAGE}:${IMAGE_TAG},${IMAGE}:${EPLUS_TAG}"
-          if [ "${{ inputs.push_latest }}" = "true" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            TAGS="${TAGS},${IMAGE}:latest"
+          PY="${{ matrix.python-version }}"
+
+          # Always publish Python-suffixed tags for each matrix variant
+          TAGS="${IMAGE}:${IMAGE_TAG}-py${PY},${IMAGE}:${EPLUS_TAG}-py${PY}"
+
+          # Only the default Python gets the bare tags (avoid collisions)
+          if [ "${PY}" = "${DEFAULT_PY}" ]; then
+            if [ "${{ inputs.push_latest }}" = "true" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              TAGS="${TAGS},${IMAGE}:${IMAGE_TAG},${IMAGE}:${EPLUS_TAG},${IMAGE}:latest"
+            fi
           fi
+
           echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           echo "tags=${TAGS}"   >> "$GITHUB_OUTPUT"
 
@@ -75,7 +94,8 @@ jobs:
           tags: ${{ steps.tags.outputs.tags }}
           build-args: |
             EPLUS_TAG=${{ env.EPLUS_TAG }}
-            # Used in your Dockerfile to avoid GitHub API rate limits when fetching EnergyPlus assets
+            PYTHON_VERSION=${{ matrix.python-version }}
+            # Used by your Dockerfile to avoid GH API rate limits when fetching EnergyPlus assets
             GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
